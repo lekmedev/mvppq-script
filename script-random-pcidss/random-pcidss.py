@@ -11,7 +11,8 @@ import pywintypes
 # ==========================================
 # CẤU HÌNH ĐƯỜNG DẪN
 # ==========================================
-ROOT_PATH = r"C:\Users\HNGUYENTRONG\Desktop\Thường Dùng\INVENTORY 2026 IMAGE"
+#ROOT_PATH = r"C:\Users\HNGUYENTRONG\Desktop\Thường Dùng\INVENTORY 2026 IMAGE"
+ROOT_PATH = r""
 
 GREEN  = "\033[92m"
 RED    = "\033[91m"
