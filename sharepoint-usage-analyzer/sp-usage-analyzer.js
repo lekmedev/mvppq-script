@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Graph Explorer Toolkit (Modular - Fluent Storage with Advanced Link & Clean UI)
+// @name         Graph Explorer Toolkit (Modular - Fluent Storage with Advanced Link & Clean UI)  json batching
 // @namespace    http://tampermonkey.net/
-// @version      5.1
-// @description  Bộ công cụ mở rộng cho Microsoft Graph Explorer - Hỗ trợ thay đổi kích thước Panel, nút bấm Fluent UI đồng bộ, tối ưu luồng hủy cài đặt.
+// @version      5.2
+// @description  Bộ công cụ mở rộng cho Microsoft Graph Explorer - Hỗ trợ thay đổi kích thước Panel, nút bấm Fluent UI đồng bộ, tối ưu luồng hủy cài đặt và áp dụng JSON Batching tăng tốc độ quét.
 // @match        https://developer.microsoft.com/en-us/graph/graph-explorer*
 // @match        https://developer.microsoft.com/graph/graph-explorer*
 // @grant        none
@@ -117,13 +117,27 @@
     };
 
     // =====================================================================
-    // 4. GRAPH API
+    // 4. GRAPH API (Bổ sung JSON Batching)
     // =====================================================================
     const GraphAPI = {
         async request(url) {
             const token = TokenManager.getToken();
             const headers = { Authorization: `Bearer ${token}` };
             return TokenManager.originalFetch(url, { headers });
+        },
+
+        // Hàm xử lý JSON Batching nâng cao cho MS Graph (Tối đa 20 requests/batch)
+        async batchRequest(requests) {
+            const token = TokenManager.getToken();
+            const url = "https://graph.microsoft.com/v1.0/$batch";
+            return TokenManager.originalFetch(url, {
+                method: "POST",
+                headers: {
+                    "Authorization": `Bearer ${token}`,
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({ requests })
+            });
         },
 
         async resolveSiteId(siteUrl) {
@@ -138,34 +152,16 @@
         },
 
         async getDrives(siteId) {
-            const url = `https://graph.microsoft.com/v1.0/sites/${siteId}/drives?$select=name,id,webUrl`;
+            const url = `https://graph.microsoft.com/v1.0/sites/${siteId}/drives?\$select=name,id,webUrl`;
             const res = await this.request(url);
             if (!res.ok) throw new Error("Token hết hạn hoặc tài khoản không có quyền trên Site.");
             const data = await res.json();
             return (data.value || []).filter(d => !/^_\$.*/.test(d.name));
         },
 
-        async getDriveUsedSize(driveId) {
-            let used = 0;
-            let url = `https://graph.microsoft.com/v1.0/drives/${driveId}/root/children?$select=name,size,folder&$top=200`;
-
-            while (url) {
-                const res = await this.request(url);
-                if (!res.ok) break;
-                const data = await res.json();
-                const items = data.value || [];
-                for (const item of items) {
-                    if (Utils.isSystemItem(item.name)) continue;
-                    used += item.size || 0;
-                }
-                url = data["@odata.nextLink"] || null;
-            }
-            return used;
-        },
-
         async getFolderChildren(driveId, itemId) {
             let results = [];
-            let url = `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${itemId}/children?$select=id,name,size,folder,file,webUrl&$top=200`;
+            let url = `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${itemId}/children?\$select=id,name,size,folder,file,webUrl&\$top=200`;
 
             while (url) {
                 const res = await this.request(url);
@@ -183,49 +179,39 @@
     // =====================================================================
     const StyleManager = {
         BASE_CSS: `
-/* Trạng thái mặc định (Mũi tên hướng sang phải ▶) */
-.sp-tree-toggle {
-    cursor: pointer !important;
-    width: 16px;
-    height: 16px;
-    flex-shrink: 0;
-    text-align: center;
-    font-size: 11px;
-    color: #6c757d;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-
-    /* Hiệu ứng chuyển động mượt mà thực tế */
-    transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), color 0.2s ease;
-    transform-origin: center center;
-    transform: rotate(0deg); /* Neo góc mặc định */
-    padding: 0;
-}
-
-.sp-tree-toggle:hover {
-    background: #eef2f7;
-    border-radius: 4px;
-    color: #0f6cbd;
-}
-
-/* Khi thư mục mở (Mũi tên hướng xuống dưới ▼) */
-.sp-tree-toggle.sp-tree-toggle-expanded {
-    color: #0f6cbd;
-    transform: rotate(90deg); /* Trình duyệt sẽ bám vào đây để tạo hiệu ứng transition quay mượt */
-}
+            .sp-tree-toggle {
+                cursor: pointer !important;
+                width: 16px;
+                height: 16px;
+                flex-shrink: 0;
+                text-align: center;
+                font-size: 11px;
+                color: #6c757d;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), color 0.2s ease;
+                transform-origin: center center;
+                transform: rotate(0deg);
+                padding: 0;
+            }
+            .sp-tree-toggle:hover {
+                background: #eef2f7;
+                border-radius: 4px;
+                color: #0f6cbd;
+            }
+            .sp-tree-toggle.sp-tree-toggle-expanded {
+                color: #0f6cbd;
+                transform: rotate(90deg);
+            }
             #gx-toolbar-anchor { display: inline-flex; }
             .gx-panel { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background:#f9fbfd; }
             .gx-panel * { box-sizing: border-box; }
-.disabledbtn {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
+            .disabledbtn { opacity: 0.6; cursor: not-allowed; }
             .gx-panel { display:none; position:fixed; bottom:20px; right:20px; width:650px; height:580px;
                 background:#fff; z-index:99999; border-radius:8px; border:1px solid #eaeaea;
                 box-shadow: 0 10px 25px rgba(0,0,0,0.15); flex-direction: column;
                 min-width: 400px; min-height: 350px; max-width: 95vw; max-height: 92vh; }
-
             .gx-panel-header { display:flex; justify-content:space-between; align-items:center; padding:10px 16px;
                 background-color:#0f6cbd; color:#fff; flex-shrink: 0; user-select: none; }
             .gx-panel-title { display:flex; align-items:center; gap:10px; font-size:14px; font-weight:600; }
@@ -233,40 +219,31 @@
             .gx-panel-btn-min { cursor:pointer; font-size:16px; opacity:0.8; width:28px; height:28px;
                 display:flex; align-items:center; justify-content:center; border-radius:4px; transition: all 0.2s; }
             .gx-panel-btn-min:hover { opacity:1; background: rgba(255,255,255,0.2); }
-
             .gx-panel-body { padding:20px; flex-grow: 1; overflow-y: auto; position: relative; }
-
             .gx-minibar { position:fixed; bottom:20px; right:20px; height:40px; background:#0f6cbd; color:#fff;
                 display:flex; align-items:center; gap:12px; padding:0 14px; border-radius:20px; z-index:99999;
                 cursor:pointer; font-size:13px; font-weight:600; }
             .gx-mini-dot { width:8px; height:8px; background:#52c41a; border-radius:50%; box-shadow: 0 0 8px #52c41a; }
             .gx-mini-status { font-weight:400; opacity:0.9; max-width:150px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-
-            /* CSS ĐỒNG BỘ NỀN NÚT SPLIT BUTTON & BÁNH RĂNG THEO STYLE GỐC */
             .gx-split-btn-container { position: relative; display: inline-flex; vertical-align: middle; margin-left: 8px; }
             .gx-btn-main { border-top-right-radius: 0 !important; border-bottom-right-radius: 0 !important; border-right: none !important; background-color: var(--control-accent-color, #0f6cbd) !important; color: #fff !important; }
             .gx-btn-main:hover { background-color: var(--control-accent-color-hover, #106ebe) !important; }
-
             .gx-btn-dropdown-toggle { padding-left: 10px !important; padding-right: 10px !important; border-top-left-radius: 0 !important; border-bottom-left-radius: 0 !important; position: relative; display: flex; align-items: center; justify-content: center; background-color: var(--control-accent-color, #0f6cbd) !important; color: #fff !important; }
             .gx-btn-dropdown-toggle:hover { background-color: var(--control-accent-color-hover, #106ebe) !important; }
             .gx-btn-dropdown-toggle::before { content: ""; position: absolute; left: 0; top: 25%; height: 50%; width: 1px; background: rgba(255,255,255,0.3); }
-
             .gx-toolbar-btn { display:inline-flex; align-items:center; gap:6px; font-weight:600; color: #fff; }
             .gx-toolbar-setting { font-size:15px; cursor:pointer; margin-left:4px; display:inline-flex; align-items:center; justify-content:center; background-color: var(--control-accent-color, #0f6cbd) !important; color:#fff !important; border-radius: 4px !important; width: 32px; height: 32px; padding: 0 !important; }
             .gx-toolbar-setting:hover { background-color: var(--control-accent-color-hover, #106ebe) !important; }
-
             .gx-dropdown-menu { position: absolute; top: 100%; right: 0; z-index: 1000; display: none; min-width: 170px; padding: 4px 0; margin: 2px 0 0; font-size: 13px; text-align: left; list-style: none; background-color: #fff; background-clip: padding-box; border: 1px solid rgba(0,0,0,.15); border-radius: 4px; box-shadow: 0 6px 12px rgba(0,0,0,.175); }
             .gx-dropdown-menu.show { display: block; }
             .gx-dropdown-item { display: block; width: 100%; padding: 8px 14px; clear: both; font-weight: 400; color: #333; text-align: inherit; white-space: nowrap; background: none; border: none; cursor: pointer; }
             .gx-dropdown-item:hover { background-color: #f5f5f5; color: #0f6cbd; }
-
             .gx-loading { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:16px; padding:40px 0; color:#555; font-size:14px; }
             .gx-spinner { width:32px; height:32px; border:3px solid #e3f3eb; border-top-color:#0f6cbd; border-radius:50%; animation: gx-spin 0.8s linear infinite; }
             @keyframes gx-spin { to { transform: rotate(360deg); } }
             .gx-error { display:flex; gap:12px; align-items:flex-start; padding:16px; background:#fdf3f3; border:1px solid #fbd6d6; border-radius:8px; }
             .gx-error-title { font-weight:600; color:#c0392b; font-size:14px; }
             .gx-error-desc { font-size:12px; color:#6c757d; }
-
             .gx-progress-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.4); z-index: 100000; display: flex; align-items: center; justify-content: center; }
             .gx-progress-box { background: #fff; padding: 24px; border-radius: 8px; width: 420px; box-shadow: 0 4px 12px rgba(0,0,0,0.2); text-align: center; }
             .gx-progress-title { font-weight: 600; font-size: 15px; margin-bottom: 12px; color: #2b303a; white-space: pre-line; }
@@ -274,22 +251,15 @@
             .gx-progress-bar-fill { height: 100%; background: #0f6cbd; width: 0%; transition: width 0.1s ease; }
             .gx-progress-btn-cancel { background: #fdf3f3; color: #c0392b; border: 1px solid #fbd6d6; padding: 6px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; }
             .gx-progress-btn-cancel:hover { background: #fbd6d6; }
-
             .gx-resizable-handle { position: absolute; background: transparent; z-index: 10000; }
             .gx-handle-top { top: -3px; left: 0; width: 100%; height: 6px; cursor: n-resize; }
             .gx-handle-left { top: 0; left: -3px; width: 6px; height: 100%; cursor: w-resize; }
             .gx-handle-topleft { top: -4px; left: -4px; width: 8px; height: 8px; cursor: nw-resize; }
-
-            /* CSS ĐỊNH DẠNG CÂY THƯ MỤC VÀ TỆP TIN */
             .sp-tree-row-wrapper-link { display: inline-flex; align-items: center; gap: 6px; text-decoration: none; color: inherit; max-width: calc(100% - 180px); }
             .sp-tree-row-wrapper-link:hover .sp-tree-name { color: #0f6cbd; text-decoration: underline; }
-
             .sp-tree-folder-arrow-link { text-decoration: none; color: #0f6cbd; font-size: 11px; margin-left: 6px; display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 4px; opacity: 0.3; transition: all 0.15s; }
             .sp-tree-row:hover .sp-tree-folder-arrow-link { opacity: 1; background: #e0ebf7; }
             .sp-tree-folder-arrow-link:hover { color: #0058ff; transform: scale(1.1); }
-
-            .sp-tree-toggle { cursor: pointer !important; width:16px; flex-shrink:0; text-align:center; font-size:11px; color:#6c757d; display:inline-flex; align-items:center; justify-content:center; transition: transform 0.15s ease; padding: 4px 0; }
-            .sp-tree-toggle:hover { background: #eef2f7; border-radius: 4px; color: #0f6cbd; }
         `,
 
         inject(features) {
@@ -347,7 +317,6 @@
             toggleBtn.style.margin = "0";
             toggleBtn.innerHTML = "▼";
 
-            // SỬA ĐỔI: Chỉ giữ lại tính năng "Quét kèm Thùng rác" trong menu thả xuống
             const menu = document.createElement("div");
             menu.className = "gx-dropdown-menu";
             menu.innerHTML = `
@@ -422,7 +391,6 @@
         }
 
         _bindCommonEvents() {
-            // Nút chính mặc định chạy quét tiêu chuẩn
             this.mainBtn.addEventListener("click", (e) => {
                 e.preventDefault();
                 this.show();
@@ -461,7 +429,7 @@
                 this.settingsBtn.addEventListener("click", (e) => {
                     e.preventDefault();
                     if (typeof this.feature.onSettings === "function") {
-                        this.feature.onSettings(this.panelEl, this.minibarEl, this);
+                        this.feature.onSettings(this.panelEl, minibarEl, this);
                     }
                 });
             }
@@ -527,7 +495,7 @@
     }
 
     // =====================================================================
-    // 7. FEATURE: SharePoint Storage Analyzer
+    // 7. FEATURE: SharePoint Storage Analyzer (Tích hợp JSON Batching)
     // =====================================================================
     class StorageAnalyzerFeature {
         constructor() {
@@ -560,23 +528,18 @@
                 .sp-list-container { flex-grow: 1; overflow-y:auto; display:flex; flex-direction:column; gap:8px; padding-right: 4px; }
                 .sp-list-container::-webkit-scrollbar { width:5px; }
                 .sp-list-container::-webkit-scrollbar-thumb { background:#ddd; border-radius:10px; }
-
                 .sp-card-row { display:flex; align-items:center; justify-content:space-between; padding:11px 14px; background:#fff; border:1px solid #eaeaea; border-radius:8px; }
                 .sp-card-row.sp-row-trash { background: #fffaf0; border: 1px dashed #ffa940; }
                 .sp-card-info { display:flex; align-items:center; gap:10px; min-width:0; max-width: calc(100% - 140px); }
                 .sp-drive-icon { flex-shrink:0; }
                 .sp-drive-name { font-size:13px; font-weight:500; color:#2b303a; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-decoration:none; }
-
                 .sp-drive-link-anchor { text-decoration: none; display: inline-flex; align-items: center; gap: 8px; color: inherit; min-width: 0; width: 100%; }
                 .sp-drive-link-anchor:hover .sp-drive-name { color: #0f6cbd; text-decoration: underline; }
-
                 .sp-badge-size { font-size:13px; font-weight:600; color:#0f6cbd; background:#e6f4ea; padding:4px 10px; border-radius:6px; }
                 .sp-card-row.sp-row-trash .sp-badge-size { color: #d46b08; background: #ffe7ba; }
-
                 .sp-footer { display:none; align-items:center; justify-content:space-between; margin-top:16px; padding-top:12px; border-top:1px solid #eee; flex-shrink: 0; }
                 .sp-total-label { font-size:13px; color:#6c757d; }
                 .sp-total-value { font-size:18px; font-weight:700; color:#0f6cbd; }
-
                 .sp-footer-actions { display: inline-flex; position: relative; }
                 .sp-copy-btn { display:inline-flex; align-items:center; gap:8px; padding:10px 18px; background:#0f6cbd; color:#fff; border:none; border-top-left-radius:8px; border-bottom-left-radius:8px; font-size:13px; font-weight:600; cursor:pointer; border-right: 1px solid rgba(255,255,255,0.2); }
                 .sp-copy-btn.sp-copy-success { background:#1e9e54; }
@@ -585,28 +548,21 @@
                 .sp-copy-dropdown-menu.show { display: block; }
                 .sp-copy-dropdown-item { width: 100%; text-align: left; padding: 8px 14px; background: none; border: none; cursor: pointer; font-size: 13px; color: #333; }
                 .sp-copy-dropdown-item:hover { background: #f5f5f5; color: #0f6cbd; }
-
                 .sp-card-actions { display:flex; align-items:center; gap:8px; flex-shrink:0; }
                 .sp-tree-open-btn { border:none; background:#eef2f7; color:#0f6cbd; border-radius:6px; cursor:pointer; font-size:13px; padding:5px 8px; line-height:1; }
                 .sp-tree-open-btn:hover { background:#e1e9f5; }
-
                 .sp-view-tree { display:none; }
                 .sp-tree-loading { display:none; }
                 .sp-tree-header { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:12px; flex-shrink: 0; }
                 .sp-back-btn { background:none; border:none; color:#0f6cbd; font-weight:600; cursor:pointer; font-size:13px; padding:4px 0; flex-shrink:0; }
                 .sp-back-btn:hover { text-decoration:underline; }
                 .sp-tree-drive-name { font-weight:600; font-size:13.5px; color:#2b303a; text-align:right; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width: 60%; }
-
                 .sp-tree-container { flex-grow: 1; overflow-y:auto; overflow-x:auto; border: 1px solid #f0f0f0; border-radius: 6px; background: #fff; }
                 .sp-tree-container::-webkit-scrollbar { width:5px; height:6px; }
                 .sp-tree-container::-webkit-scrollbar-thumb { background:#ddd; border-radius:10px; }
-
                 .sp-tree-wrapper-inner { display: inline-block; min-width: 100%; width: max-content; padding: 6px; }
-
-                .sp-tree-row { display:flex; align-items:center; gap:6px; padding:6px 8px;
-                    padding-left:calc(var(--sp-depth) * 18px + 6px); border-radius:4px; white-space: nowrap; width: 100%; }
+                .sp-tree-row { display:flex; align-items:center; gap:6px; padding:6px 8px; padding-left:calc(var(--sp-depth) * 18px + 6px); border-radius:4px; white-space: nowrap; width: 100%; }
                 .sp-tree-row:hover { background:#f3f6fb; }
-
                 .sp-tree-icon { flex-shrink:0; font-size:13px; }
                 .sp-tree-name { font-size:13px; color:#2b303a; white-space: nowrap; }
                 .sp-tree-size { margin-left: auto; font-size:12px; color:#0f6cbd; font-weight:600; width:90px; text-align:right; flex-shrink: 0; }
@@ -633,8 +589,7 @@
                             <button class="sp-copy-btn">📋 Copy Dữ Liệu</button>
                             <button class="sp-copy-dropdown-toggle">▼</button>
                             <div class="sp-copy-dropdown-menu">
-                                <!--<button class="sp-copy-dropdown-item" data-export="tsv">📋 Copy dạng bảng TSV</button>-->
-                                <button class="sp-copy-dropdown-item disabledbtn" disabled data-export="excel" title="Thêm vào ver sau">📊 Xuất dữ liệu Excel (.xlsx)</button>
+                                <button class="sp-copy-dropdown-item" data-export="excel" title="Xuất toàn bộ cấu trúc sang Excel">📊 Xuất dữ liệu Excel (.xlsx)</button>
                             </div>
                         </div>
                     </div>
@@ -737,9 +692,7 @@
                 dropdownMenu.classList.remove("show");
 
                 const type = item.dataset.export;
-                if (type === "tsv") {
-                    this.copyResultsToClipboard(panelEl);
-                } else if (type === "excel") {
+                if (type === "excel") {
                     this.exportToExcelWorkflow();
                 }
             });
@@ -757,44 +710,37 @@
 
             panelEl.querySelector(".sp-tree-container").addEventListener("click", (e) => {
                 const toggle = e.target.closest(".sp-tree-toggle");
-
                 if (toggle) {
                     e.preventDefault();
                     e.stopPropagation();
 
                     const nodeEl = e.target.closest(".sp-tree-node");
                     if (nodeEl && nodeEl.classList.contains("sp-tree-folder")) {
-
-                        // 1. Bật/Tắt class ngay lập tức để kích hoạt hiệu ứng CSS transition xoay tại chỗ
                         toggle.classList.toggle("sp-tree-toggle-expanded");
 
-                        // 2. HOÃN lệnh render lại cây thư mục một chút để nhìn thấy hiệu ứng xoay mượt mà
                         setTimeout(() => {
                             this.toggleNode(panelEl, nodeEl.dataset.itemId);
-                        }, 180); // 180ms là khoảng thời gian vừa đủ đẹp (nhỏ hơn 0.2s của transition một chút)
+                        }, 180);
                     }
                     return;
                 }
-
-                if (e.target.closest("a")) return;
             });
         }
 
-        // SỬA ĐỔI: Khi ấn hủy sẽ dừng luôn lập tức, không làm thay đổi trạng thái giao diện hiện tại
         onSettings(panelEl, minibarEl, host) {
             const current = ConfigStore.get("sp_site_url", DEFAULT_SITE_URL);
             const url = prompt("Nhập URL đầy đủ của Site SharePoint cần quét:", current);
 
-            if (url === null) return; // Người dùng nhấn nút Hủy (Cancel) -> Dừng hẳn, không làm gì.
-            if (!url.trim()) return;  // Người dùng xóa trống rồi nhấn OK -> Dừng hẳn.
+            if (url === null) return;
+            if (!url.trim()) return;
 
             ConfigStore.set("sp_site_url", url.trim());
 
-            // Chỉ khi nhập link hợp lệ mới mở Panel ra và kích hoạt quét mới
             host.show();
             this.startAnalyzing(panelEl, minibarEl, host, false);
         }
 
+        // THAY THẾ LUỒNG QUÉT CŨ BẰNG CƠ CHẾ JSON BATCHING TỐI ƯU TỐC ĐỘ GẤP 20 LẦN
         async startAnalyzing(panelEl, minibarEl, host, includeRecycleBin = false) {
             const loadingEl = panelEl.querySelector(".sp-loading");
             const loadingText = panelEl.querySelector(".sp-loading-text");
@@ -844,17 +790,42 @@
                 let driveSizes = [];
                 let totalBytes = 0;
 
-                for (let i = 0; i < drives.length; i++) {
-                    const d = drives[i];
-                    updateStatus(`Quét ổ đĩa (${i + 1}/${drives.length}): ${d.name}`);
-                    try {
-                        const used = await GraphAPI.getDriveUsedSize(d.id);
-                        if (used > 0) {
-                            driveSizes.push({ id: d.id, name: d.name, gb: Utils.bytesToGB(used), bytes: used, webUrl: d.webUrl });
-                            totalBytes += used;
+                // ÁP DỤNG JSON BATCHING: Chia nhỏ mảng thành từng cụm tối đa 20 items
+                const BATCH_SIZE = 20;
+                for (let i = 0; i < drives.length; i += BATCH_SIZE) {
+                    const chunk = drives.slice(i, i + BATCH_SIZE);
+
+                    const batchRequests = chunk.map((d) => ({
+                        id: d.id,
+                        method: "GET",
+                        url: `/drives/${d.id}/root/children?\$select=name,size,folder&\$top=200`
+                    }));
+
+                    updateStatus(`Quét Batch ổ đĩa (${i + 1} - ${Math.min(i + BATCH_SIZE, drives.length)} / ${drives.length})`);
+
+                    const batchRes = await GraphAPI.batchRequest(batchRequests);
+                    if (!batchRes.ok) throw new Error("Gặp sự cố khi gửi dữ liệu Batch.");
+
+                    const batchData = await batchRes.json();
+
+                    for (const response of batchData.responses) {
+                        const driveObj = chunk.find(d => d.id === response.id);
+                        if (!driveObj) continue;
+
+                        if (response.status === 200) {
+                            const items = response.body.value || [];
+                            let used = 0;
+                            for (const item of items) {
+                                if (Utils.isSystemItem(item.name)) continue;
+                                used += item.size || 0;
+                            }
+                            if (used > 0) {
+                                driveSizes.push({ id: driveObj.id, name: driveObj.name, gb: Utils.bytesToGB(used), bytes: used, webUrl: driveObj.webUrl });
+                                totalBytes += used;
+                            }
+                        } else {
+                            console.error(`Thất bại tại nhánh đĩa ${driveObj.name}. Mã trạng thái: ${response.status}`);
                         }
-                    } catch (err) {
-                        console.error("Bỏ qua ổ đĩa lỗi: " + d.name, err);
                     }
                 }
 
@@ -863,7 +834,7 @@
 
                 if (includeRecycleBin) {
                     updateStatus("Đang mở cổng kết nối dữ liệu rác (Beta)...");
-                    let binUrl = `https://graph.microsoft.com/beta/sites/${this.siteFullId}/recycleBin/items?$select=size,deletedDateTime,name,deletedBy,deletedFromLocation&$top=1500`;
+                    let binUrl = `https://graph.microsoft.com/beta/sites/${this.siteFullId}/recycleBin/items?\$select=size,deletedDateTime,name,deletedBy,deletedFromLocation&\$top=1500`;
 
                     while (binUrl) {
                         const res = await GraphAPI.request(binUrl);
@@ -1062,7 +1033,6 @@
                             <span class="sp-tree-icon">📁</span>
                             <span class="sp-tree-name">${Utils.escapeHtml(node.name)}</span>
                         </a>
-                        <!--<a href="${escapedUrl}" target="_blank" rel="noopener noreferrer" class="sp-tree-folder-arrow-link" title="Mở liên kết gốc">↗</a> -->
                     `;
                 } else {
                     html += `
@@ -1239,7 +1209,7 @@
                     wsDrive["!freeze"] = { xSplit: 0, ySplit: 1 };
                     this.autoFitColumns(wsDrive);
 
-                    const safeSheetName = drive.name.replace(/[\[\]\*\?\:\\\/]/g, "").substring(0, 31);
+                    const safeSheetName = drive.name.replace(/[\[\]\* \?\:\\\/]/g, "").substring(0, 31);
                     XLSX.utils.book_append_sheet(workbook, wsDrive, safeSheetName);
                 }
 
