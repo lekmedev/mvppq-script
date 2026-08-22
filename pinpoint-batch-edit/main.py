@@ -399,8 +399,7 @@ class PinpointClient:
 
 if __name__ == "__main__":
 
-    #start_delay = random.randint(300, 1500)
-    start_delay = random.randint(0,1)
+    start_delay = random.randint(300, 1500)
 
     print(
         f"[*] Script sẽ chạy sau "
