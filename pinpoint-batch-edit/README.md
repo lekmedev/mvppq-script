@@ -345,6 +345,33 @@ Toàn bộ chuỗi chỉ gồm 4 request HTTP:
 Token lấy từ `result.token` trong body (fallback: header `X-Auth-Token`).
 Sau đó mọi API call chỉ cần header `x-auth-token` — **không cần cookie** của domain zerorisk.io.
 
+Sơ đồ sequence (GitHub tự render Mermaid):
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant S as main.py (requests)
+    participant H as HCP (Moodle)
+    participant P as Pinpoint API
+
+    S->>H: GET /accor/login/index.php
+    H-->>S: HTML form + logintoken (CSRF)
+    S->>H: POST username/password/logintoken
+    H-->>S: Session cookie MoodleSession
+
+    S->>H: GET /accor/hcp/ntt/nttcreatetest.php
+    H-->>S: 302 → /auth/login-url/{uuid}
+    Note over S,H: {uuid} = vé one-time do HCP sinh ra
+
+    S->>P: GET /api/v2/users/sign_in?token={uuid}
+    P-->>S: result.token (+ header X-Auth-Token)
+
+    loop Mỗi device (random delay 10–100s)
+        S->>P: POST /api/v1/pinpoint/quickaudit<br/>header x-auth-token
+        P-->>S: 200 OK
+    end
+```
+
 ### 12.2. Luồng tổng thể
 
 ```text
