@@ -1,13 +1,13 @@
 // ==UserScript==
 // @name         Graph Explorer Toolkit (Modular - Fluent Storage with Advanced Link & Clean UI)  json batching
 // @namespace    http://tampermonkey.net/
-// @version      5.2
-// @description  Bộ công cụ mở rộng cho Microsoft Graph Explorer - Hỗ trợ thay đổi kích thước Panel, nút bấm Fluent UI đồng bộ, tối ưu luồng hủy cài đặt và áp dụng JSON Batching tăng tốc độ quét.
+// @version      6.0
+// @description  Bộ công cụ mở rộng cho Microsoft Graph Explorer - JSON Batching, auto-retry 429/401, cột ngày chỉnh sửa, ẩn/hiện cột tree view, xuất Excel đầy đủ.
 // @match        https://developer.microsoft.com/en-us/graph/graph-explorer*
 // @match        https://developer.microsoft.com/graph/graph-explorer*
 // @grant        none
 // @run-at       document-start
-// @require      https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
+// @require      https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js
 // ==/UserScript==
 
 (function () {
@@ -47,6 +47,7 @@
             originalFetch,
             getToken: () => token,
             hasToken: () => !!token,
+            invalidate() { token = null; },
             async ensureToken() {
                 if (!token) {
                     try { await originalFetch("https://graph.microsoft.com/v1.0/me"); } catch (e) { /* ignore */ }
@@ -120,17 +121,42 @@
     // 4. GRAPH API (Bổ sung JSON Batching)
     // =====================================================================
     const GraphAPI = {
-        async request(url) {
+        MAX_RETRIES: 3,
+        TOKEN_EXPIRED_MSG: 'Token đã hết hạn hoặc chưa hợp lệ (401).\n👉 Vui lòng bấm nút "Access token" trên thanh công cụ Graph Explorer (hoặc chạy thử 1 truy vấn bất kỳ) để lấy token mới, sau đó quét lại.',
+
+        // GET kèm auto-retry khi bị throttle (429/503) và phát hiện token hết hạn (401)
+        async request(url, options = {}, attempt = 0) {
             const token = TokenManager.getToken();
-            const headers = { Authorization: `Bearer ${token}` };
-            return TokenManager.originalFetch(url, { headers });
+            const headers = Object.assign({ Authorization: `Bearer ${token}` }, options.headers || {});
+
+            let res;
+            try {
+                res = await TokenManager.originalFetch(url, Object.assign({}, options, { headers }));
+            } catch (err) {
+                if (err && err.name === "AbortError") throw new Error("TaskAborted");
+                throw err;
+            }
+
+            if (res.status === 401) {
+                TokenManager.invalidate();
+                throw new Error(this.TOKEN_EXPIRED_MSG);
+            }
+
+            if ((res.status === 429 || res.status === 503) && attempt < this.MAX_RETRIES) {
+                const waitSec = parseInt(res.headers.get("Retry-After"), 10);
+                const delayMs = (Number.isFinite(waitSec) && waitSec > 0 ? waitSec : Math.pow(2, attempt) * 2) * 1000;
+                await new Promise(resolve => setTimeout(resolve, delayMs));
+                return this.request(url, options, attempt + 1);
+            }
+
+            return res;
         },
 
         // Hàm xử lý JSON Batching nâng cao cho MS Graph (Tối đa 20 requests/batch)
-        async batchRequest(requests) {
+        async batchRequest(requests, options = {}) {
             const token = TokenManager.getToken();
             const url = "https://graph.microsoft.com/v1.0/$batch";
-            return TokenManager.originalFetch(url, {
+            const init = Object.assign({}, options, {
                 method: "POST",
                 headers: {
                     "Authorization": `Bearer ${token}`,
@@ -138,6 +164,20 @@
                 },
                 body: JSON.stringify({ requests })
             });
+
+            let res;
+            try {
+                res = await TokenManager.originalFetch(url, init);
+            } catch (err) {
+                if (err && err.name === "AbortError") throw new Error("TaskAborted");
+                throw err;
+            }
+
+            if (res.status === 401) {
+                TokenManager.invalidate();
+                throw new Error(this.TOKEN_EXPIRED_MSG);
+            }
+            return res;
         },
 
         async resolveSiteId(siteUrl) {
@@ -154,17 +194,36 @@
         async getDrives(siteId) {
             const url = `https://graph.microsoft.com/v1.0/sites/${siteId}/drives?\$select=name,id,webUrl`;
             const res = await this.request(url);
-            if (!res.ok) throw new Error("Token hết hạn hoặc tài khoản không có quyền trên Site.");
+            if (!res.ok) {
+                throw new Error(res.status === 403
+                    ? "Tài khoản không có quyền truy cập Site này (403)."
+                    : `Không tải được danh sách Drive (HTTP ${res.status}).`);
+            }
             const data = await res.json();
             return (data.value || []).filter(d => !/^_\$.*/.test(d.name));
         },
 
-        async getFolderChildren(driveId, itemId) {
-            let results = [];
-            let url = `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${itemId}/children?\$select=id,name,size,folder,file,webUrl&\$top=200`;
-
+        // Lấy nốt các trang tiếp theo khi response của Batch trả về @odata.nextLink
+        async followPaging(firstBody) {
+            let items = firstBody.value || [];
+            let url = firstBody["@odata.nextLink"] || null;
             while (url) {
                 const res = await this.request(url);
+                if (!res.ok) break;
+                const data = await res.json();
+                items = items.concat(data.value || []);
+                url = data["@odata.nextLink"] || null;
+            }
+            return items;
+        },
+
+        async getFolderChildren(driveId, itemId, abortSignal = null) {
+            let results = [];
+            let url = `https://graph.microsoft.com/v1.0/drives/${driveId}/items/${itemId}/children?\$select=id,name,size,folder,file,webUrl,lastModifiedDateTime&\$top=200`;
+            const options = abortSignal ? { signal: abortSignal } : {};
+
+            while (url) {
+                const res = await this.request(url, options);
                 if (!res.ok) throw new Error("Không thể tải dữ liệu thư mục.");
                 const data = await res.json();
                 results = results.concat(data.value || []);
@@ -429,7 +488,7 @@
                 this.settingsBtn.addEventListener("click", (e) => {
                     e.preventDefault();
                     if (typeof this.feature.onSettings === "function") {
-                        this.feature.onSettings(this.panelEl, minibarEl, this);
+                        this.feature.onSettings(this.panelEl, this.minibarEl, this);
                     }
                 });
             }
@@ -520,6 +579,81 @@
             this.recycleBinTotalBytes = 0;
             this.siteFullId = null;
             this.isRecycleBinScanned = false;
+
+            // Trạng thái ẩn/hiện cột của Tree view (lưu localStorage)
+            this.hiddenCols = this.loadColumnPrefs();
+
+            // Trạng thái sắp xếp Tree view: "size" | "date" và "desc" | "asc"
+            const sortPrefs = this.loadSortPrefs();
+            this.sortKey = sortPrefs.key;
+            this.sortDir = sortPrefs.dir;
+        }
+
+        loadColumnPrefs() {
+            try {
+                const raw = JSON.parse(ConfigStore.get("sp_tree_hidden_cols", "{}"));
+                return {
+                    date: !!raw.date,
+                    size: !!raw.size,
+                    bar: !!raw.bar
+                };
+            } catch (e) {
+                return { date: false, size: false, bar: false };
+            }
+        }
+
+        saveColumnPrefs() {
+            ConfigStore.set("sp_tree_hidden_cols", JSON.stringify(this.hiddenCols));
+        }
+
+        loadSortPrefs() {
+            try {
+                const raw = JSON.parse(ConfigStore.get("sp_tree_sort", "{}"));
+                return {
+                    key: raw.key === "date" ? "date" : "size",
+                    dir: raw.dir === "asc" ? "asc" : "desc"
+                };
+            } catch (e) {
+                return { key: "size", dir: "desc" };
+            }
+        }
+
+        saveSortPrefs() {
+            ConfigStore.set("sp_tree_sort", JSON.stringify({ key: this.sortKey, dir: this.sortDir }));
+        }
+
+        // Sắp xếp node theo chế độ đang chọn; item không có ngày luôn nằm cuối
+        sortNodes(nodes) {
+            const mul = this.sortDir === "asc" ? 1 : -1;
+            return [...nodes].sort((a, b) => {
+                if (this.sortKey === "date") {
+                    const ta = Date.parse(a.modifiedRaw || "");
+                    const tb = Date.parse(b.modifiedRaw || "");
+                    const aMissing = Number.isNaN(ta);
+                    const bMissing = Number.isNaN(tb);
+                    if (aMissing && bMissing) return b.size - a.size;
+                    if (aMissing) return 1;
+                    if (bMissing) return -1;
+                    if (ta !== tb) return (ta - tb) * mul;
+                }
+                return (a.size - b.size) * mul;
+            });
+        }
+
+        applyColumnVisibility(treeViewEl) {
+            if (!treeViewEl) return;
+            treeViewEl.classList.toggle("col-hidden-date", this.hiddenCols.date);
+            treeViewEl.classList.toggle("col-hidden-size", this.hiddenCols.size);
+            treeViewEl.classList.toggle("col-hidden-bar", this.hiddenCols.bar);
+            treeViewEl.querySelectorAll(".sp-col-chip").forEach(chip => {
+                chip.classList.toggle("active", !this.hiddenCols[chip.dataset.col]);
+            });
+            treeViewEl.querySelectorAll(".sp-sort-chip").forEach(chip => {
+                const isActive = this.sortKey === chip.dataset.key;
+                chip.classList.toggle("active", isActive);
+                const arrow = chip.querySelector(".sp-sort-dir");
+                if (arrow) arrow.textContent = isActive ? (this.sortDir === "asc" ? "↑" : "↓") : "";
+            });
         }
 
         get styles() {
@@ -553,7 +687,7 @@
                 .sp-tree-open-btn:hover { background:#e1e9f5; }
                 .sp-view-tree { display:none; }
                 .sp-tree-loading { display:none; }
-                .sp-tree-header { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:12px; flex-shrink: 0; }
+                .sp-tree-header { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:12px; flex-shrink: 0; flex-wrap:wrap; }
                 .sp-back-btn { background:none; border:none; color:#0f6cbd; font-weight:600; cursor:pointer; font-size:13px; padding:4px 0; flex-shrink:0; }
                 .sp-back-btn:hover { text-decoration:underline; }
                 .sp-tree-drive-name { font-weight:600; font-size:13.5px; color:#2b303a; text-align:right; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width: 60%; }
@@ -568,6 +702,26 @@
                 .sp-tree-size { margin-left: auto; font-size:12px; color:#0f6cbd; font-weight:600; width:90px; text-align:right; flex-shrink: 0; }
                 .sp-tree-bar-wrap { width:60px; height:6px; background:#eef2f7; border-radius:3px; overflow:hidden; flex-shrink:0; margin-left: 10px; }
                 .sp-tree-bar { height:100%; background:#0f6cbd; border-radius:3px; }
+                .sp-tree-modified { font-size:11px; color:#8a93a3; width:108px; text-align:right; flex-shrink:0; margin-left:10px; white-space:nowrap; }
+                .col-hidden-date .sp-tree-modified { display:none !important; }
+                .col-hidden-size .sp-tree-size { display:none !important; }
+                .col-hidden-bar .sp-tree-bar-wrap { display:none !important; }
+                .sp-col-chips { display:flex; gap:5px; flex-shrink:0; margin-left:8px; }
+                .sp-col-chip { display:inline-flex; align-items:center; gap:4px; padding:2px 9px; font-size:11px; font-weight:600;
+                    border:1px solid #dbe4ee; background:#fff; color:#5b6676; border-radius:999px; cursor:pointer;
+                    transition:all .15s ease; user-select:none; white-space:nowrap; }
+                .sp-col-chip:hover { border-color:#0f6cbd; color:#0f6cbd; background:#f3f8fd; }
+                .sp-col-chip.active { background:#e6f1fa; border-color:#0f6cbd; color:#0f6cbd; }
+                .sp-toolbar-sep { width:1px; height:18px; background:#dbe4ee; flex-shrink:0; align-self:center; margin:0 2px; }
+                .sp-sort-group { display:inline-flex; align-items:center; gap:2px; flex-shrink:0;
+                    background:#f4f7fb; border:1px solid #dbe4ee; border-radius:9px; padding:2px; }
+                .sp-sort-chip { display:inline-flex; align-items:center; gap:5px; padding:3px 11px; font-size:11px; font-weight:600;
+                    color:#5b6676; background:transparent; border:none; border-radius:7px; cursor:pointer;
+                    transition:background .18s ease, color .18s ease, box-shadow .18s ease; user-select:none; white-space:nowrap; }
+                .sp-sort-chip:hover { color:#0f6cbd; background:#e8f1fa; }
+                .sp-sort-chip.active { background:#0f6cbd; color:#fff; box-shadow:0 2px 6px rgba(15,108,189,.35); }
+                .sp-sort-dir { display:inline-block; min-width:9px; text-align:center; font-size:10.5px; line-height:1;
+                    transform-origin:center; transition:transform .18s ease, opacity .18s ease; }
                 .sp-tree-node-loading { display:flex; align-items:center; gap:8px; padding:6px 8px 6px calc(var(--sp-depth) * 18px + 26px); color:#6c757d; font-size:12px; }
                 .sp-tree-node-loading .gx-spinner { width:16px; height:16px; border-width:2px; }
             `;
@@ -599,6 +753,16 @@
                     <div class="sp-tree-header">
                         <button class="sp-back-btn">← Quay lại danh sách Drive</button>
                         <div class="sp-tree-drive-name"></div>
+                        <div class="sp-col-chips" title="Bấm để ẩn/hiện cột cho gọn màn hình">
+                            <span class="sp-col-chip" data-col="date">📅 Ngày</span>
+                            <span class="sp-col-chip" data-col="size">💾 Dung lượng</span>
+                            <span class="sp-col-chip" data-col="bar">📊 Bar</span>
+                        </div>
+                        <div class="sp-toolbar-sep"></div>
+                        <div class="sp-sort-group" title="Sắp xếp theo — bấm lại để đảo chiều tăng/giảm">
+                            <button type="button" class="sp-sort-chip" data-key="size">⇅ Dung lượng<span class="sp-sort-dir"></span></button>
+                            <button type="button" class="sp-sort-chip" data-key="date">⇅ Ngày<span class="sp-sort-dir"></span></button>
+                        </div>
                     </div>
                     <div class="gx-loading sp-tree-loading">
                         <div class="gx-spinner"></div>
@@ -725,6 +889,41 @@
                     return;
                 }
             });
+
+            // Chip ẩn/hiện cột trong Tree view
+            panelEl.querySelector(".sp-col-chips").addEventListener("click", (e) => {
+                const chip = e.target.closest(".sp-col-chip");
+                if (!chip) return;
+                const col = chip.dataset.col;
+                if (!(col in this.hiddenCols)) return;
+
+                this.hiddenCols[col] = !this.hiddenCols[col];
+                this.saveColumnPrefs();
+                this.applyColumnVisibility(panelEl.querySelector(".sp-view-tree"));
+            });
+
+            // Nhóm sắp xếp: bấm chip đang bật -> đảo chiều ↑/↓; bấm chip kia -> chuyển cột (mặc định giảm dần)
+            panelEl.querySelector(".sp-sort-group").addEventListener("click", (e) => {
+                const chip = e.target.closest(".sp-sort-chip");
+                if (!chip) return;
+
+                if (this.sortKey === chip.dataset.key) {
+                    this.sortDir = this.sortDir === "desc" ? "asc" : "desc";
+                } else {
+                    this.sortKey = chip.dataset.key;
+                    this.sortDir = "desc";
+                }
+
+                this.saveSortPrefs();
+                const treeViewEl = panelEl.querySelector(".sp-view-tree");
+                this.applyColumnVisibility(treeViewEl);
+
+                // Re-render ngay từ dữ liệu đã cache trong driveTrees (không gọi lại API)
+                const tree = this.driveTrees[this.activeDriveId];
+                if (tree && this.currentView === "tree") {
+                    this.renderTree(treeViewEl.querySelector(".sp-tree-wrapper-inner"), tree.rootNodes);
+                }
+            });
         }
 
         onSettings(panelEl, minibarEl, host) {
@@ -795,7 +994,7 @@
                 for (let i = 0; i < drives.length; i += BATCH_SIZE) {
                     const chunk = drives.slice(i, i + BATCH_SIZE);
 
-                    const batchRequests = chunk.map((d) => ({
+                    const buildBatchRequests = (driveList) => driveList.map((d) => ({
                         id: d.id,
                         method: "GET",
                         url: `/drives/${d.id}/root/children?\$select=name,size,folder&\$top=200`
@@ -803,28 +1002,45 @@
 
                     updateStatus(`Quét Batch ổ đĩa (${i + 1} - ${Math.min(i + BATCH_SIZE, drives.length)} / ${drives.length})`);
 
-                    const batchRes = await GraphAPI.batchRequest(batchRequests);
-                    if (!batchRes.ok) throw new Error("Gặp sự cố khi gửi dữ liệu Batch.");
+                    // Gửi batch, tự retry các nhánh đĩa bị throttle (429/503) bên trong batch
+                    let pendingDrives = chunk;
+                    let pass = 0;
 
-                    const batchData = await batchRes.json();
+                    while (pendingDrives.length > 0 && pass <= GraphAPI.MAX_RETRIES) {
+                        const batchRes = await GraphAPI.batchRequest(buildBatchRequests(pendingDrives));
+                        if (!batchRes.ok) throw new Error(`Gặp sự cố khi gửi dữ liệu Batch (HTTP ${batchRes.status}).`);
 
-                    for (const response of batchData.responses) {
-                        const driveObj = chunk.find(d => d.id === response.id);
-                        if (!driveObj) continue;
+                        const batchData = await batchRes.json();
+                        const throttled = [];
 
-                        if (response.status === 200) {
-                            const items = response.body.value || [];
-                            let used = 0;
-                            for (const item of items) {
-                                if (Utils.isSystemItem(item.name)) continue;
-                                used += item.size || 0;
+                        for (const response of batchData.responses) {
+                            const driveObj = pendingDrives.find(d => d.id === response.id);
+                            if (!driveObj) continue;
+
+                            if (response.status === 200) {
+                                // Hỗ trợ phân trang: response của batch có thể trả @odata.nextLink nếu >200 item gốc
+                                const items = await GraphAPI.followPaging(response.body);
+                                let used = 0;
+                                for (const item of items) {
+                                    if (Utils.isSystemItem(item.name)) continue;
+                                    used += item.size || 0;
+                                }
+                                if (used > 0) {
+                                    driveSizes.push({ id: driveObj.id, name: driveObj.name, gb: Utils.bytesToGB(used), bytes: used, webUrl: driveObj.webUrl });
+                                    totalBytes += used;
+                                }
+                            } else if ((response.status === 429 || response.status === 503) && pass < GraphAPI.MAX_RETRIES) {
+                                throttled.push(driveObj);
+                            } else {
+                                console.error(`Thất bại tại nhánh đĩa ${driveObj.name}. Mã trạng thái: ${response.status}`);
                             }
-                            if (used > 0) {
-                                driveSizes.push({ id: driveObj.id, name: driveObj.name, gb: Utils.bytesToGB(used), bytes: used, webUrl: driveObj.webUrl });
-                                totalBytes += used;
-                            }
-                        } else {
-                            console.error(`Thất bại tại nhánh đĩa ${driveObj.name}. Mã trạng thái: ${response.status}`);
+                        }
+
+                        pendingDrives = throttled;
+                        if (throttled.length > 0) {
+                            pass++;
+                            updateStatus(`⏳ ${throttled.length} drive bị giới hạn tốc độ, chờ 3s rồi thử lại...`);
+                            await new Promise(resolve => setTimeout(resolve, 3000));
                         }
                     }
                 }
@@ -922,6 +1138,7 @@
             listView.style.display = "none";
             treeView.style.display = "flex";
             treeView.querySelector(".sp-tree-drive-name").textContent = driveName;
+            this.applyColumnVisibility(treeView);
 
             if (this.driveTrees[driveId]) {
                 treeLoading.style.display = "none";
@@ -952,6 +1169,8 @@
                     name: item.name,
                     type: item.folder ? "folder" : "file",
                     size: item.size || 0,
+                    modified: Utils.formatIsoToVN(item.lastModifiedDateTime),
+                    modifiedRaw: item.lastModifiedDateTime || "",
                     webUrl: item.webUrl || "#",
                     loaded: false,
                     expanded: false,
@@ -1010,8 +1229,8 @@
 
         renderNodes(nodes, depth) {
             if (!nodes || nodes.length === 0) return "";
-            const sorted = [...nodes].sort((a, b) => b.size - a.size);
-            const maxSize = sorted[0].size || 0;
+            const sorted = this.sortNodes(nodes);
+            const maxSize = nodes.reduce((max, n) => Math.max(max, n.size || 0), 0);
 
             let html = "";
             sorted.forEach(node => {
@@ -1046,6 +1265,7 @@
                 html += `
                             <span class="sp-tree-size">${Utils.formatBytes(node.size)}</span>
                             <div class="sp-tree-bar-wrap"><div class="sp-tree-bar" style="width:${percent}%"></div></div>
+                            <span class="sp-tree-modified" title="Sửa lần cuối: ${node.modified || "—"}">${node.modified || ""}</span>
                         </div>
                 `;
 
@@ -1104,7 +1324,8 @@
                 progressCallback(`Đang trích xuất cấu trúc: ${current.path}\n(Đã quét ${resultList.length} tài nguyên)`);
 
                 try {
-                    const children = await GraphAPI.getFolderChildren(driveId, current.id);
+                    // Truyền AbortSignal vào fetch để hủy ngay cả request đang bay
+                    const children = await GraphAPI.getFolderChildren(driveId, current.id, abortSignal);
 
                     for (const item of children) {
                         if (Utils.isSystemItem(item.name)) continue;
@@ -1116,7 +1337,8 @@
                             Name: item.name,
                             Type: item.folder ? "Folder" : "File",
                             SizeBytes: item.size || 0,
-                            SizeGB: Utils.bytesToGB(item.size || 0)
+                            SizeGB: Utils.bytesToGB(item.size || 0),
+                            Modified: Utils.formatIsoToVN(item.lastModifiedDateTime)
                         });
 
                         if (item.folder) {
@@ -1124,6 +1346,7 @@
                         }
                     }
                 } catch (e) {
+                    if (abortSignal.aborted || e.message === "TaskAborted") throw new Error("TaskAborted");
                     console.error("Bỏ qua lỗi nhánh phân rã: ", e);
                 }
             }
@@ -1181,7 +1404,7 @@
                 wsOverview["!freeze"] = { xSplit: 0, ySplit: 1 };
                 this.autoFitColumns(wsOverview);
 
-                XLSX.utils.book_append_sheet(workbook, wsOverview, "Tổng Quan");
+                this.appendSheetUnique(workbook, wsOverview, "Tổng Quan");
 
                 for (let i = 0; i < this.lastDriveSizes.length; i++) {
                     const drive = this.lastDriveSizes[i];
@@ -1202,15 +1425,15 @@
                         "Name": f.Name,
                         "Type": f.Type,
                         "Size (Bytes)": f.SizeBytes,
-                        "Size (GB)": Number(f.SizeGB.toFixed(5))
-                    })), { header: ["Path", "Name", "Type", "Size (Bytes)", "Size (GB)"] });
+                        "Size (GB)": Number(f.SizeGB.toFixed(5)),
+                        "Modified": f.Modified || ""
+                    })), { header: ["Path", "Name", "Type", "Size (Bytes)", "Size (GB)", "Modified"] });
 
                     this.applyNumberFormatToColumn(wsDrive, "D", flatItems.length);
                     wsDrive["!freeze"] = { xSplit: 0, ySplit: 1 };
                     this.autoFitColumns(wsDrive);
 
-                    const safeSheetName = drive.name.replace(/[\[\]\* \?\:\\\/]/g, "").substring(0, 31);
-                    XLSX.utils.book_append_sheet(workbook, wsDrive, safeSheetName);
+                    this.appendSheetUnique(workbook, wsDrive, drive.name);
                 }
 
                 if (includeTrashSheet && this.recycleBinItems) {
@@ -1232,7 +1455,7 @@
                     wsTrash["!freeze"] = { xSplit: 0, ySplit: 1 };
                     this.autoFitColumns(wsTrash);
 
-                    XLSX.utils.book_append_sheet(workbook, wsTrash, "Thùng rác");
+                    this.appendSheetUnique(workbook, wsTrash, "Thùng rác");
                 }
 
                 progress.update(98, "Đang đóng gói file nhị phân Excel (.xlsx)...");
@@ -1266,7 +1489,8 @@
                     Name: node.name,
                     Type: node.type === "folder" ? "Folder" : "File",
                     SizeBytes: node.size,
-                    SizeGB: Utils.bytesToGB(node.size)
+                    SizeGB: Utils.bytesToGB(node.size),
+                    Modified: node.modified || ""
                 });
                 if (node.type === "folder" && node.children) {
                     const nextPath = currentPath + (currentPath === "/" ? "" : "/") + node.name;
@@ -1274,6 +1498,19 @@
                 }
             });
             return results;
+        }
+
+        // Đặt tên sheet an toàn: strip ký tự cấm, giới hạn 31 ký tự, tự đánh số nếu trùng
+        appendSheetUnique(workbook, ws, rawName) {
+            const base = (String(rawName || "Sheet").replace(/[\[\]\*\?\:\\\/]/g, "")).trim().substring(0, 28) || "Sheet";
+            const taken = new Set(workbook.SheetNames.map(n => n.toLowerCase()));
+
+            let candidate = base;
+            let suffix = 2;
+            while (taken.has(candidate.toLowerCase())) {
+                candidate = `${base.substring(0, 27)}~${suffix++}`.substring(0, 31);
+            }
+            XLSX.utils.book_append_sheet(workbook, ws, candidate);
         }
 
         autoFitColumns(ws) {
@@ -1336,6 +1573,13 @@
         sourceBtn.insertAdjacentElement("afterend", marker);
     }
 
-    const observer = new MutationObserver(() => createCustomUI());
+    const observer = new MutationObserver(() => {
+        // Đã mount xong thì ngừng quan sát để không đốt CPU trên SPA nặng
+        if (document.getElementById("gx-toolkit-mounted")) {
+            observer.disconnect();
+            return;
+        }
+        createCustomUI();
+    });
     observer.observe(document.documentElement, { childList: true, subtree: true });
 })();
