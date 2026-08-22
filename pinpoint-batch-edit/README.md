@@ -4,8 +4,8 @@ Python script tự động đăng nhập vào HCP, truy cập Pinpoint và thự
 
 Script hỗ trợ:
 
-* Tự động đăng nhập HCP bằng Playwright.
-* Lấy Access Token từ Pinpoint.
+* Tự động đăng nhập HCP bằng **HTTP requests thuần** (không cần browser/Playwright).
+* Lấy Access Token từ Pinpoint qua cơ chế SSO one-time ticket.
 * Thực hiện Quick Audit cho danh sách Device ID.
 * Random delay giữa các thiết bị để tránh gửi request liên tục.
 * Random delay khi script khởi động.
@@ -16,7 +16,6 @@ Script hỗ trợ:
 ## 1. Yêu cầu
 
 * Python 3.10+
-* Chromium/Playwright
 * `requests`
 * `python-dotenv`
 * Tài khoản HCP hợp lệ
@@ -55,18 +54,6 @@ Cài dependencies:
 
 ```bash
 pip install -r requirements.txt
-```
-
-Cài browser cho Playwright:
-
-```bash
-playwright install chromium
-```
-
-Trên Linux server có thể cần:
-
-```bash
-playwright install-deps chromium
 ```
 
 ## 3. Cấu hình `.env`
@@ -132,8 +119,10 @@ Sau đó script bắt đầu đăng nhập:
 
 ```text
 [*] Đăng nhập HCP...
+[+] Đăng nhập HCP: OK
+[*] Lấy vé SSO sang Pinpoint...
+[*] Đổi vé lấy Access Token...
 [+] Access Token: OK
-[*] Mở Pinpoint...
 ```
 
 ## 5. Quick Audit
@@ -297,6 +286,7 @@ pinpoint-batch-audit/
 ├── .env
 ├── .gitignore
 ├── requirements.txt
+├── AGENTS.md
 └── README.md
 ```
 
@@ -314,7 +304,6 @@ __pycache__/
 `requirements.txt`:
 
 ```text
-playwright
 requests
 python-dotenv
 ```
@@ -325,7 +314,38 @@ Cài đặt:
 pip install -r requirements.txt
 ```
 
-## 12. Luồng hoạt động
+## 12. Luồng hoạt động & cơ chế xác thực
+
+### 12.1. Cơ chế xác thực (SSO thuần HTTP, không cần browser)
+
+Access Token **do server Pinpoint cấp**, không phải do JS sinh ra ở client.
+Toàn bộ chuỗi chỉ gồm 4 request HTTP:
+
+```text
+1. GET {HCP_URL}/accor/login/index.php
+      └── parse logintoken (CSRF token) từ HTML form
+
+2. POST {HCP_URL}/accor/login/index.php
+      data: username, password, logintoken, anchor
+      └── nhận session HCP (cookie MoodleSession)
+
+3. GET {HCP_URL}/accor/hcp/ntt/nttcreatetest.php   (allow_redirects=False)
+      └── trả 302 Location:
+          https://pinpoint.zerorisk.io/auth/login-url/{uuid}
+          → {uuid} là vé one-time do HCP sinh ra (mỗi lần đăng nhập 1 giá trị)
+
+4. GET https://pinpoint.zerorisk.io/api/v2/users/sign_in?token={uuid}
+      headers: x-requested-with: XMLHttpRequest
+               referer: {base}/auth/login-url/{uuid}
+      └── server đổi vé lấy session, trả về:
+          body : {"result": {"token": "...", "userId": ..., "entityId": ...}}
+          header: X-Auth-Token: ...
+```
+
+Token lấy từ `result.token` trong body (fallback: header `X-Auth-Token`).
+Sau đó mọi API call chỉ cần header `x-auth-token` — **không cần cookie** của domain zerorisk.io.
+
+### 12.2. Luồng tổng thể
 
 ```text
 Server start
@@ -334,13 +354,13 @@ Server start
 Random delay 5–25 phút
      │
      ▼
-Đăng nhập HCP
+Đăng nhập HCP (POST form + logintoken CSRF)
      │
      ▼
-Mở Pinpoint
+GET nttcreatetest.php → vé one-time UUID (302)
      │
      ▼
-Lấy Access Token
+GET /api/v2/users/sign_in?token={uuid} → Access Token
      │
      ▼
 Đọc DEVICE_IDS
@@ -391,20 +411,6 @@ Nếu Discord Webhook bị lộ, hãy **xóa/revoke webhook cũ và tạo webhoo
 
 ## 14. Troubleshooting
 
-### Playwright không tìm thấy Chromium
-
-Chạy:
-
-```bash
-playwright install chromium
-```
-
-Linux:
-
-```bash
-playwright install-deps chromium
-```
-
 ### Không lấy được Access Token
 
 Kiểm tra:
@@ -415,13 +421,22 @@ HCP_PASSWORD
 HCP_URL
 ```
 
-Đồng thời kiểm tra giao diện HCP có thay đổi selector đăng nhập hoặc text:
+Sau đó kiểm tra thủ công bằng trình duyệt:
+
+1. Đăng nhập HCP, xem trang vẫn còn link **"Click here to access the terminal inventory"**
+   (link này trỏ tới `ntt/nttcreatetest.php` — nếu HCP đổi đường dẫn, phải cập nhật URL trong `login()`).
+2. Form đăng nhập Moodle: nếu HCP thêm/sửa field (vd `logintoken`), phải cập nhật
+   phần POST trong `login()`.
+3. Nếu `sign_in` trả lỗi (không phải 200): vé one-time có thể đã hết hạn hoặc bị dùng 2 lần —
+   mỗi vé chỉ dùng được đúng 1 lần, chạy lại script để lấy vé mới.
+
+Lỗi thường gặp:
 
 ```text
-Click here to access the terminal inventory
+[-] Đăng nhập HCP thất bại: ...        → sai username/password hoặc HCP đổi form login
+[-] Không lấy được vé SSO              → HCP đổi path nttcreatetest.php hoặc session không hợp lệ
+[-] sign_in thất bại: 4xx              → vé one-time hết hạn/không hợp lệ
 ```
-
-hay không.
 
 ### Discord không nhận thông báo
 

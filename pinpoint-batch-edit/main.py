@@ -1,8 +1,8 @@
 import os
+import re
 import random
 import time
 from dotenv import load_dotenv
-from playwright.sync_api import sync_playwright
 import requests
 
 # Load các biến từ file .env
@@ -18,6 +18,13 @@ PINPOINT_BASE_URL = os.getenv(
 )
 
 DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")
+
+# User-Agent dùng cho toàn bộ request (HCP + Pinpoint)
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/126.0.0.0 Safari/537.36"
+)
 
 # URL để mở trực tiếp device trên Pinpoint
 # Ví dụ:
@@ -158,9 +165,11 @@ class PinpointClient:
 
     def __init__(self):
         self.token = None
-        self.cookies = None
-        self.user_agent = None
         self.base_url = PINPOINT_BASE_URL
+
+        # Session requests dùng chung cho luồng đăng nhập
+        self.session = requests.Session()
+        self.session.headers.update({"User-Agent": USER_AGENT})
 
         self.success = 0
         self.failed = 0
@@ -169,77 +178,98 @@ class PinpointClient:
         self.failed_devices = []
 
     def login(self):
+        """
+        Đăng nhập thuần requests (không cần Playwright):
 
-        with sync_playwright() as p:
+        1. GET trang login HCP (Moodle) -> lấy logintoken CSRF
+        2. POST username/password -> session HCP
+        3. GET nttcreatetest.php -> 302 chứa vé one-time UUID
+           dạng /auth/login-url/{uuid}
+        4. GET /api/v2/users/sign_in?token={uuid}
+           -> server trả access token trong body (result.token)
+              và header X-Auth-Token
+        """
 
-            browser = p.chromium.launch(headless=True)
+        print("[*] Đăng nhập HCP...")
 
-            context = browser.new_context()
-            page = context.new_page()
+        r = self.session.get(
+            f"{HCP_URL}/accor/login/index.php",
+            timeout=30,
+        )
 
-            print("[*] Đăng nhập HCP...")
+        m = re.search(
+            r'name="logintoken"\s+value="([^"]+)"',
+            r.text,
+        )
 
-            page.goto(HCP_URL)
+        logintoken = m.group(1) if m else ""
 
-            page.fill(
-                'input[name="username"]',
-                USERNAME
-            )
+        r = self.session.post(
+            f"{HCP_URL}/accor/login/index.php",
+            data={
+                "username": USERNAME,
+                "password": PASSWORD,
+                "logintoken": logintoken,
+                "anchor": "",
+            },
+            timeout=30,
+            allow_redirects=True,
+        )
 
-            page.fill(
-                'input[name="password"]',
-                PASSWORD
-            )
+        if "home.php" not in str(r.url):
+            print("[-] Đăng nhập HCP thất bại:", r.url)
+            return
 
-            page.click(
-                'button[type="submit"]'
-            )
+        print("[+] Đăng nhập HCP: OK")
 
-            page.wait_for_load_state("networkidle")
+        print("[*] Lấy vé SSO sang Pinpoint...")
 
-            print("[*] Mở Pinpoint...")
+        r = self.session.get(
+            f"{HCP_URL}/accor/hcp/ntt/nttcreatetest.php",
+            timeout=30,
+            allow_redirects=False,
+        )
 
-            with page.expect_popup() as popup:
-                page.click(
-                    "text=Click here to access the terminal inventory"
-                )
+        loc = r.headers.get("Location", "")
 
-            pinpoint = popup.value
+        uuid = None
 
-            pinpoint.wait_for_load_state("networkidle")
+        if "/auth/login-url/" in loc:
+            uuid = loc.rstrip("/").split("/")[-1]
+        elif "token=" in loc:
+            uuid = loc.split("token=")[-1].split("&")[0]
 
-            print("[+] URL:", pinpoint.url)
+        if not uuid:
+            print("[-] Không lấy được vé SSO (Location:", loc[:80], ")")
+            return
 
-            self.token = pinpoint.evaluate("""
-                () => {
-                    const s = localStorage.getItem("storage:auth-session");
+        print("[*] Đổi vé lấy Access Token...")
 
-                    if (!s) {
-                        return null;
-                    }
+        r = self.session.get(
+            f"{self.base_url}/api/v2/users/sign_in",
+            params={"token": uuid},
+            headers={
+                "accept": "application/json",
+                "x-requested-with": "XMLHttpRequest",
+                "referer": f"{self.base_url}/auth/login-url/{uuid}",
+            },
+            timeout=30,
+        )
 
-                    return JSON.parse(s).token;
-                }
-            """)
+        if not r.ok:
+            print("[-] sign_in thất bại:", r.status_code)
+            return
 
-            if self.token:
-                print("[+] Access Token: OK")
-            else:
-                print("[-] Không lấy được Access Token")
+        try:
+            self.token = r.json()["result"]["token"]
+        except Exception:
+            # Fallback: token nằm ở response header
+            self.token = r.headers.get("X-Auth-Token")
 
-            self.user_agent = page.evaluate(
-                "navigator.userAgent"
-            )
-
-            cookies = context.cookies()
-
-            self.cookies = {
-                c["name"]: c["value"]
-                for c in cookies
-                if "zerorisk.io" in c["domain"]
-            }
-
-            browser.close()
+        if self.token:
+            print("[+] Access Token: OK")
+        else:
+            print("[-] Không lấy được Access Token")
 
     def quick_audit(self, device_id):
 
@@ -247,7 +277,7 @@ class PinpointClient:
             "accept": "application/json",
             "content-type": "application/json",
             "locale": "en",
-            "user-agent": self.user_agent,
+            "user-agent": USER_AGENT,
             "x-requested-with": "XMLHttpRequest",
             "x-auth-token": self.token,
         }
@@ -264,7 +294,6 @@ class PinpointClient:
             r = requests.post(
                 f"{self.base_url}/api/v1/pinpoint/quickaudit",
                 headers=headers,
-                cookies=self.cookies,
                 json=body,
                 timeout=60,
             )
@@ -370,7 +399,8 @@ class PinpointClient:
 
 if __name__ == "__main__":
 
-    start_delay = random.randint(300, 1500)
+    #start_delay = random.randint(300, 1500)
+    start_delay = random.randint(0,1)
 
     print(
         f"[*] Script sẽ chạy sau "

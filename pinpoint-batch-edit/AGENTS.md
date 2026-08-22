@@ -4,17 +4,34 @@
 
 ## Mô tả
 
-`main.py` — Playwright (sync API) automation chạy **quick audit hàng loạt** thiết bị trên
-Pinpoint (zerorisk.io), lấy auth gián tiếp qua trang quản trị HCP.
+`main.py` — Python thuần (`requests` + `python-dotenv`, **KHÔNG dùng Playwright/browser**)
+chạy **quick audit hàng loạt** thiết bị trên Pinpoint (zerorisk.io),
+lấy auth gián tiếp qua trang quản trị HCP (Moodle).
+
+## Cơ chế xác thực (đã reverse-engineer & verify 2026-08)
+
+Access Token do **server Pinpoint cấp**, không phải JS client sinh. Chuỗi 4 request:
+
+1. `GET {HCP_URL}/accor/login/index.php` → parse `logintoken` (CSRF) từ HTML form.
+2. `POST` form login (username/password/logintoken/anchor) → session HCP
+   (check thành công bằng `"home.php" in url`).
+3. `GET {HCP_URL}/accor/hcp/ntt/nttcreatetest.php` với `allow_redirects=False`
+   → **302 Location**: `{PINPOINT_BASE_URL}/auth/login-url/{uuid}`
+   → `{uuid}` là vé one-time, mỗi lần login chỉ dùng được đúng 1 lần.
+4. `GET {PINPOINT_BASE_URL}/api/v2/users/sign_in?token={uuid}` với header
+   `x-requested-with: XMLHttpRequest` + `referer: .../auth/login-url/{uuid}`
+   → body `result.token` (fallback: header `X-Auth-Token`).
+
+Sau đó mọi API call chỉ cần header `x-auth-token`, **không cần cookie zerorisk.io**
+(đã test dashboard 200 OK không cookie). Cookie HCP giữ trong `self.session`.
 
 ## Luồng hoạt động
 
-1. `PinpointClient.login()` — mở Chromium headless, điền form đăng nhập HCP
-   (`HCP_URL`), chờ popup SSO, đánh cắp **token + cookies + user-agent** từ phiên trình duyệt.
+1. `PinpointClient.login()` — chuỗi SSO 4 bước ở trên, lưu token vào `self.token`.
 2. `run()` — lặp qua `DEVICE_IDS` (env), **random delay giữa các device** để tránh rate limit,
    log tiến trình từng thiết bị.
 3. `quick_audit(device_id)` — POST thẳng `{PINPOINT_BASE_URL}/api/v1/pinpoint/quickaudit`
-   bằng requests + cookies đã lấy.
+   với header `x-auth-token`.
 4. Báo cáo tổng kết qua **Discord webhook**: embed xanh nếu tất cả OK,
    embed đỏ kèm danh sách link device fail nếu có lỗi.
 
@@ -32,8 +49,7 @@ Pinpoint (zerorisk.io), lấy auth gián tiếp qua trang quản trị HCP.
 ## Chạy & deploy
 
 ```bash
-pip install playwright requests python-dotenv
-playwright install chromium      # bắt buộc trước lần chạy đầu
+pip install -r requirements.txt   # requests + python-dotenv
 python main.py
 ```
 
@@ -42,6 +58,8 @@ README.md trong thư mục này có sẵn hướng dẫn deploy systemd service
 
 ## Lưu ý khi sửa
 
-- Selector form login HCP nằm trong `login()` — site đổi UI là phải cập nhật lại.
+- Vé one-time `{uuid}` **chỉ dùng được 1 lần** — đừng cache/retry bước 4 với cùng vé.
+- Path `ntt/nttcreatetest.php` và field form Moodle nằm trong `login()` —
+  HCP đổi UI/path là phải cập nhật lại.
 - Random delay giữa devices là chủ đích (tránh bị Pinpoint block), đừng bỏ.
-- Token/cookies sống theo session HCP; nếu audit loạt fail liên tục thì nghi ngờ hết phiên.
+- Token sống theo session HCP; nếu audit loạt fail liên tục thì nghi ngờ hết phiên.

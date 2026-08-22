@@ -23,7 +23,7 @@ kèm một số tool automation khác (Pinpoint, PCIDSS).
 | `sharepoint-usage-analyzer/windirstat_style.py` | Python CLI | Quét đệ quy toàn bộ thư mục SharePoint, hiển thị cây kiểu WinDirStat, xuất CSV/JSON |
 | `sharepoint-usage-analyzer/sp-storagever2dot4.zip` | Release artifact | Bản đóng gói cũ (v2.4) — KHÔNG sửa file zip |
 | `extension/` | Chrome Extension MV3 | Phiên bản cũ (v3.1) của analyzer dưới dạng Chrome Extension (`content.js` + `inject.js`, GA4 tracking). Chỉ có README + zip đóng gói, không có source trong repo |
-| `pinpoint-batch-edit/main.py` | Python + Playwright | Automation hàng loạt thiết bị trên Pinpoint (zerorisk.io) qua auth HCP, thông báo Discord webhook |
+| `pinpoint-batch-edit/main.py` | Python requests thuần | Automation hàng loạt thiết bị trên Pinpoint (zerorisk.io) qua auth SSO HCP, thông báo Discord webhook |
 | `recyclebin-report-sharepoint/recyclebin-report-sharepoint.py` | Python one-shot | Lấy Recycle Bin site qua Graph beta endpoint → xuất Excel (openpyxl) nhóm theo phòng ban |
 | `script-random-pcidss/random-pcidss.py` | Python + pywin32 | Randomize timestamp (created/modified) của file Windows bằng `win32file.SetFileTime` — chuẩn bị image máy theo PCIDSS |
 
@@ -159,9 +159,11 @@ Python CLI quét SÂU mọi Drive trong site (đối lập bản JS chỉ tính 
 - **`extension/`** — Chrome Extension Manifest V3 phiên bản cũ của analyzer (v3.1):
   kiến trúc content.js/inject.js tách lớp để qua CSP, `chrome.storage.local`, GA4 Measurement
   Protocol. Repo chỉ chứa README + zip release, **không có source** — đừng tìm file .js trong này.
-- **`pinpoint-batch-edit/main.py`** — Playwright sync: đăng nhập HCP (`hcp.vigitrust.com`)
-  bằng credentials từ `.env`, thao tác hàng loạt device trên Pinpoint (`DEVICE_IDS` trong `.env`),
-  báo cáo ra **Discord webhook**. Config hoàn toàn qua env vars.
+- **`pinpoint-batch-edit/main.py`** — requests thuần (đã bỏ Playwright): đăng nhập HCP
+  (`hcp.vigitrust.com`, Moodle + CSRF `logintoken`) → GET `ntt/nttcreatetest.php` lấy vé
+  one-time UUID (302) → `GET /api/v2/users/sign_in?token={uuid}` nhận access token từ body.
+  Audit hàng loạt device trên Pinpoint (`DEVICE_IDS` trong `.env`) bằng header `x-auth-token`
+  (không cần cookie zerorisk.io), báo cáo ra **Discord webhook**. Config hoàn toàn qua env vars.
 - **`recyclebin-report-sharepoint/recyclebin-report-sharepoint.py`** — one-shot: dán Bearer TOKEN
   trực tiếp vào biến `TOKEN` trong source, gọi Graph beta recycleBin (`$top=15000`,
   order by deletedDateTime desc), nhóm theo phòng ban (parse path phần tử thứ 3),
