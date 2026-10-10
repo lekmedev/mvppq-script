@@ -39,8 +39,9 @@ Ví dụ response: `{"ip":"10.139.20.88","C_free_gb":120.5,"D_free_gb":450.2}`
   Windows service chạy với cwd = `C:\Windows\System32`, builder mặc định đọc config
   sai chỗ.
 - Logging UTF-8 **không BOM** (`new UTF8Encoding(false)`).
-- Build artifact (`bin/`, `obj/`, `publish/`, `*.log`) không commit — xem `.gitignore`.
-  File `.exe` 70 MB tự build lại bằng `publish.ps1`, không đẩy exe lên repo.
+- Build artifact (`bin/`, `obj/`, `*.log`) không commit — xem `.gitignore`.
+  File `.exe` (~70 MB) nằm sẵn ở `publish/win-x64/DiskSpaceApi.exe` trong repo
+  (force-add, bypass `.gitignore`) để lấy về chạy ngay không cần build.
   (`sp-usage-analyzer.js` có zip release cũ là ngoại lệ lịch sử, không áp dụng ở đây.)
 - Commit message: ngắn, tiếng Anh.
 

@@ -1,8 +1,11 @@
-# .NET build outputs
+# .NET build outputs (never commit)
 bin/
 obj/
-publish/
 TestResults/
+
+# Publish output (except the shipped win-x64 exe, force-added)
+publish/*.log
+publish/win-x64/*.pdb
 
 # Runtime logs (service writes here, never commit)
 logs/
