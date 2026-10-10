@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>LogicTests</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Compile only the pure logic file: no service host, no DI, no Main. -->
+    <Compile Include="/home/hermes/workspace/DiskSpaceApi/WorkstationLogic.cs" Link="WorkstationLogic.cs" />
+  </ItemGroup>
+</Project>

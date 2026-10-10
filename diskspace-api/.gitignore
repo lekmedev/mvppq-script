@@ -1,0 +1,19 @@
+# .NET build outputs
+bin/
+obj/
+publish/
+TestResults/
+
+# Runtime logs (service writes here, never commit)
+logs/
+testlogs/
+*.log
+
+# .NET user/tooling state
+*.user
+.vs/
+.ionide/
+
+# OS noise
+.DS_Store
+Thumbs.db

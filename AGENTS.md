@@ -9,7 +9,7 @@
 ## 1. Tổng quan repo
 
 Bộ sưu tập script nội bộ phục vụ công việc IT Admin / IT Support, viết bởi team vận hành.
-Ngôn ngữ chính: **JavaScript (Tampermonkey userscript)** và **Python CLI**.
+Ngôn ngữ chính: **JavaScript (Tampermonkey userscript)**, **Python CLI** và **C# (.NET 8 Windows service)**.
 Toàn bộ text UI và comment trong code là **tiếng Việt** — giữ nguyên quy ước này khi sửa.
 
 Chủ đề xuyên suốt: phân tích & báo cáo dung lượng **SharePoint Online** qua **Microsoft Graph API**,
@@ -26,6 +26,7 @@ kèm một số tool automation khác (Pinpoint, PCIDSS).
 | `pinpoint-batch-edit/main.py` | Python requests thuần | Automation hàng loạt thiết bị trên Pinpoint (zerorisk.io) qua auth SSO HCP, thông báo Discord webhook |
 | `recyclebin-report-sharepoint/recyclebin-report-sharepoint.py` | Python one-shot | Lấy Recycle Bin site qua Graph beta endpoint → xuất Excel (openpyxl) nhóm theo phòng ban |
 | `script-random-pcidss/random-pcidss.py` | Python + pywin32 | Randomize timestamp (created/modified) của file Windows bằng `win32file.SetFileTime` — chuẩn bị image máy theo PCIDSS |
+| `diskspace-api/` | .NET 8 Windows service (C#) | Service `DiskSpaceApi` port TCP 9988, `GET /disk` trả IP 10.139.x.x + dung lượng trống C/D. Chi tiết xem `diskspace-api/AGENTS.md` |
 
 ## 3. File chính: `sharepoint-usage-analyzer/sp-usage-analyzer.js` (v6.0)
 
@@ -213,3 +214,11 @@ rồi bật "Quét kèm Thùng rác" để phủ luồng beta endpoint.
 7. XLSX 0.18.5 → 0.20.3 (CVE-2023-30533, CVE-2024-22363).
 8. Thêm cột Ngày chỉnh sửa (tree view + Excel) và chip ẩn/hiện cột.
 9. Sắp xếp tree view theo Dung lượng/Ngày ↑↓ (segmented control, lưu localStorage).
+
+## 9. Nhật ký thay đổi gần nhất (diskspace-api — 2026-10)
+
+Thêm thư mục `diskspace-api/`: Windows service .NET 8 `DiskSpaceApi`, port TCP 9988,
+`GET /disk` (+ `/`) trả `{"ip","C_free_gb","D_free_gb"}`. Self-contained single-file
+win-x64 (~70 MB), service `LocalSystem`, firewall `DiskSpaceApi TCP 9988`.
+Unit test logic IP/subnet/disk 31/31 (Linux). Chi tiết + bẫy kỹ thuật xem
+`diskspace-api/AGENTS.md`.
