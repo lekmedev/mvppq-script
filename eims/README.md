@@ -7,6 +7,7 @@ Userscript (Violentmonkey/Tampermonkey) tự tính tiền trên form e-sign `eof
 - Thành tiền mỗi dòng = số lượng × đơn giá, tính ngay khi nhập.
 - **Total Cost** = tổng cột thứ 7 của bảng, tự cập nhật khi bấm **Update**, thêm hoặc xóa dòng.
 - **VAT Amount** và **Total Including VAT** tự tính theo **Tax Rate**.
+- Tự thêm dấu phẩy hàng nghìn cho Total Cost, VAT Amount, Total Including VAT và Tax Rate (Tax Rate định dạng khi rời ô). Số nguyên không hiện `.00`.
 - Cộng theo cent nên không lệch 0.01.
 - Tự bật/tắt khi chuyển trang (web là SPA Blazor), chỉ chạy ở `/eofficeform/formedit`.
 
@@ -43,6 +44,8 @@ Sửa object `config` đầu file:
 
 ## Lịch sử phiên bản
 
+- **1.3.1** Thêm dấu phẩy cho VAT Amount; bỏ `.00` ở các ô số tiền.
+- **1.3.0** Thêm dấu phẩy hàng nghìn cho Total Cost, Total Including VAT, Tax Rate.
 - **1.2.1** Sửa tính dòng khi nhập; không tính tổng lúc đang sửa dòng.
 - **1.2.0** Hỗ trợ điều hướng SPA từ `/eofficeform/`.
 - **1.1.0** Tách cleanup/timer, throttle observer, theo dõi tbody, tính theo cent.
