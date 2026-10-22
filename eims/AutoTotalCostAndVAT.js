@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto Total Cost & VAT
 // @namespace    https://violentmonkey.github.io/
-// @version      1.2.0
+// @version      1.3.1
 // @description  Tự tính thành tiền từng dòng, Total Cost, VAT và Total Including VAT
 // @author       You
 // @match        https://adminmovenpickphuquoc.e-sign.vn/*
@@ -14,15 +14,15 @@
 (() => {
     "use strict";
 
-    const DEBUG = true;
+    const DEBUG = false;
     const log = (...args) => DEBUG && console.log(...args);
 
     // Tránh khởi tạo nhiều lần
     if (window.__autoTotalVM?.stop) window.__autoTotalVM.stop();
 
     // Chỉ chạy ở trang formedit (trang là SPA nên phải tự theo dõi đổi route)
-    // const isTarget = () => /\/eofficeform\/formedit(\/|$)/i.test(location.pathname);
-    const isTarget = () => /\/eofficeform\/(formedit|formcreate)(\/|$)/i.test(location.pathname);
+    const isTarget = () => /\/eofficeform\/formedit(\/|$)/i.test(location.pathname);
+
     const config = {
         quantity: "#b",
         price: "#c",
@@ -81,6 +81,17 @@
     const toCents = n => Math.round((n + Number.EPSILON) * 100);
     const fromCents = c => (c / 100).toFixed(2);
 
+    // Định dạng phân tách hàng nghìn (1,234,567.89). Ô type=number thì giữ nguyên số thô.
+    function group(n, minFrac, maxFrac, el) {
+        if (el && el.type === "number") return String(Number(n.toFixed(maxFrac)));
+        return n.toLocaleString("en-US", {
+            minimumFractionDigits: minFrac,
+            maximumFractionDigits: maxFrac
+        });
+    }
+    // Số tiền: bỏ .00 khi là số nguyên, giữ tối đa 2 số lẻ nếu có
+    const fmtCents = (c, el) => group(c / 100, 0, 2, el);
+
     function getValue(el) {
         if (!el) return "";
         return "value" in el ? el.value : el.textContent.trim();
@@ -93,14 +104,14 @@
         ).singleNodeValue;
     }
 
-    function setValue(el, value) {
+    function setValue(el, value, force = false) {
         if (!(el instanceof HTMLInputElement) && !(el instanceof HTMLTextAreaElement)) {
             console.warn("[Auto Total] Input không hợp lệ:", el);
             return false;
         }
 
         const next = String(value);
-        if (el.value === next) return true;
+        if (!force && el.value === next) return true;
 
         const setter = Object.getOwnPropertyDescriptor(
             Object.getPrototypeOf(el), "value"
@@ -118,6 +129,8 @@
         while (list.length) list.pop()();
     }
 
+    const isEditing = () => !!document.querySelector(config.rowTotal);
+
     // ---------- Tính toán ----------
 
     // 1. Thành tiền = số lượng × đơn giá
@@ -133,7 +146,7 @@
         const pText = getValue(price).trim();
 
         if (qText === "" || pText === "") {
-            return setValue(total, "0.00");
+            return setValue(total, "0.00", true);
         }
 
         const q = parseNumber(qText);
@@ -141,7 +154,7 @@
         const cents = toCents(q * p);
 
         log(`[Auto Row] ${q} × ${p} = ${fromCents(cents)}`);
-        return setValue(total, fromCents(cents));
+        return setValue(total, fromCents(cents), true);
     }
 
     // 2. Total Cost = tổng cột thứ 7 của tbody thứ 4 (cộng theo cent)
@@ -166,7 +179,7 @@
             return null;
         }
 
-        if (!setValue(input, fromCents(cents))) return null;
+        if (!setValue(input, fmtCents(cents, input))) return null;
 
         log(`[Auto Total] Total Cost = ${fromCents(cents)} | Rows = ${rows.length}`);
         return cents;
@@ -194,8 +207,8 @@
         const costCents = toCents(parseNumber(totalCostText));
         const vatCents = Math.round(costCents * taxRate / 100);
 
-        setValue(vatAmountInput, fromCents(vatCents));
-        setValue(totalInclInput, fromCents(costCents + vatCents));
+        setValue(vatAmountInput, fmtCents(vatCents, vatAmountInput));
+        setValue(totalInclInput, fmtCents(costCents + vatCents, totalInclInput));
 
         log(`[Auto VAT] VAT = ${fromCents(vatCents)} | Total = ${fromCents(costCents + vatCents)}`);
     }
@@ -257,12 +270,21 @@
             taxTimer = setTimeout(calculateTax, 150);
         };
 
+        // Định dạng dấu phẩy khi rời ô (không format lúc đang gõ để khỏi nhảy con trỏ)
+        const onTaxRateBlur = () => {
+            const t = getValue(input).trim();
+            if (t === "") return;
+            setValue(input, group(parseNumber(t), 0, 2, input));
+        };
+
         input.addEventListener("input", onTaxRateChange);
         input.addEventListener("change", onTaxRateChange);
+        input.addEventListener("focusout", onTaxRateBlur);
 
         taxCleanups.push(() => {
             input.removeEventListener("input", onTaxRateChange);
             input.removeEventListener("change", onTaxRateChange);
+            input.removeEventListener("focusout", onTaxRateBlur);
         });
 
         activeTaxInput = input;
@@ -290,10 +312,14 @@
     }
 
     // 8. Theo dõi tbody: thêm/xóa/sửa dòng thì tự tính lại
-    const tbodyObserver = new MutationObserver(() => {
+    const scheduleTbodyUpdate = () => {
         clearTimeout(tbodyTimer);
-        tbodyTimer = setTimeout(updateAllTotals, 300);
-    });
+        tbodyTimer = setTimeout(() => {
+            if (!isEditing()) updateAllTotals(); // đang sửa dòng thì bỏ qua
+        }, 300);
+    };
+
+    const tbodyObserver = new MutationObserver(scheduleTbodyUpdate);
 
     function bindTbody() {
         if (stopped) return;
@@ -309,8 +335,7 @@
         });
         activeTbody = tbody;
 
-        clearTimeout(tbodyTimer);
-        tbodyTimer = setTimeout(updateAllTotals, 300);
+        scheduleTbodyUpdate();
     }
 
     // 9. Theo dõi DOM khi Blazor/Syncfusion render lại (throttle bằng rAF)
